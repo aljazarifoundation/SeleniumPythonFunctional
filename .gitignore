@@ -1,0 +1,24 @@
+# Ignore node_modules directory
+node_modules/
+
+# Ignore log files
+*.log
+
+# Ignore environment variable files
+.env
+
+# Ignore temporary files
+temp/
+
+# Ignore specific file
+secret.txt
+
+# Ignore allure-report directory
+allure-report/
+allure-results/
+
+#Ignore venv
+venv/
+
+# Ignore Screenshot Folder
+screenshots

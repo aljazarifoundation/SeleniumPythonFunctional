@@ -1,0 +1,307 @@
+import pytest
+import allure
+import os
+import subprocess
+import pyautogui
+import time
+import getpass
+from datetime import datetime, timezone
+from typing import Optional
+import threading
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.firefox.options import Options as FirefoxOptions
+import shutil
+
+class VideoRecorder:
+    def __init__(self, output_dir="video-results"):
+        self.output_dir = output_dir
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        self.recording = False
+        self.process: Optional[subprocess.Popen] = None
+        self.current_recording = None
+
+    def _find_ffmpeg(self):
+        """Find FFmpeg executable with detailed error checking"""
+        possible_paths = [
+            os.environ.get('FFMPEG_PATH', ''),  # Check environment variable first
+            "ffmpeg.exe",  # Check current directory
+            os.path.join(os.getcwd(), "ffmpeg.exe"),
+            os.path.join(os.getcwd(), "ffmpeg", "ffmpeg.exe"),
+            os.path.join(os.getcwd(), "ffmpeg", "bin", "ffmpeg.exe"),
+            r"C:\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files (x86)\ffmpeg\bin\ffmpeg.exe",
+            shutil.which('ffmpeg.exe'),
+            shutil.which('ffmpeg')
+        ]
+
+        # Remove None and empty strings from the list
+        possible_paths = [p for p in possible_paths if p]
+
+        # Check each path
+        for path in possible_paths:
+            if os.path.isfile(path):
+                try:
+                    # Try to run ffmpeg -version to verify it works
+                    result = subprocess.run(
+                        [path, "-version"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        startupinfo=self._get_startupinfo()
+                    )
+                    if result.returncode == 0:
+                        print(f"Found working FFmpeg at: {path}")
+                        return path
+                except Exception as e:
+                    print(f"Found FFmpeg at {path} but it's not working: {str(e)}")
+                    continue
+
+        # If we get here, we couldn't find a working FFmpeg
+        error_message = (
+            "\nFFmpeg not found or not working. Please follow these steps:\n"
+            "1. Download FFmpeg:\n"
+            "   - Go to: https://github.com/BtbN/FFmpeg-Builds/releases\n"
+            "   - Download: ffmpeg-master-latest-win64-gpl.zip\n"
+            "2. Install FFmpeg:\n"
+            "   Option 1 - Local Installation:\n"
+            "   - Create 'ffmpeg' folder in your project directory\n"
+            "   - Extract downloaded zip into this folder\n"
+            "   - Ensure ffmpeg.exe is at: <project_folder>/ffmpeg/bin/ffmpeg.exe\n"
+            "\n"
+            "   Option 2 - System Installation:\n"
+            "   - Extract downloaded zip to C:\\ffmpeg\n"
+            "   - Add C:\\ffmpeg\\bin to your PATH environment variable\n"
+            "   - Restart your IDE/terminal\n"
+            "\n"
+            "Searched in following locations:\n"
+            f"{chr(10).join(possible_paths)}\n"
+        )
+        raise FileNotFoundError(error_message)
+
+    def _get_startupinfo(self):
+        """Create startupinfo object to hide FFmpeg console"""
+        if os.name == 'nt':  # Windows
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            return startupinfo
+        return None
+
+    def start_recording(self, test_name: str, video_size: str = "1920x1080"):
+        try:
+            # Find FFmpeg executable
+            ffmpeg_exe = self._find_ffmpeg()
+            print(f"Using FFmpeg from: {ffmpeg_exe}")
+
+            # Create output directory if it doesn't exist
+            os.makedirs(self.output_dir, exist_ok=True)
+
+            timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            user = getpass.getuser()
+            self.current_recording = os.path.join(
+                self.output_dir,
+                f"{test_name}_{user}_{timestamp}.mp4"
+            )
+
+            width, height = map(int, video_size.split('x'))
+
+            ffmpeg_cmd = [
+                ffmpeg_exe,
+                '-f', 'gdigrab',
+                '-framerate', '30',
+                '-video_size', f'{width}x{height}',
+                '-offset_x', '0',
+                '-offset_y', '0',
+                '-draw_mouse', '1',
+                '-i', 'desktop',
+                '-c:v', 'libx264',
+                '-preset', 'ultrafast',
+                '-pix_fmt', 'yuv420p',
+                '-y',
+                self.current_recording
+            ]
+
+            print("Starting FFmpeg with command:", ' '.join(ffmpeg_cmd))
+
+            self.process = subprocess.Popen(
+                ffmpeg_cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                startupinfo=self._get_startupinfo()
+            )
+            
+            # Wait a moment to check if FFmpeg started successfully
+            time.sleep(1)
+            if self.process.poll() is not None:
+                # Process has already terminated
+                stdout, stderr = self.process.communicate()
+                raise RuntimeError(
+                    f"FFmpeg failed to start. Exit code: {self.process.returncode}\n"
+                    f"Error: {stderr.decode('utf-8', errors='replace')}"
+                )
+
+            print(f"\nStarted recording: {self.current_recording}")
+            self.recording = True
+
+        except Exception as e:
+            print(f"Failed to start recording: {str(e)}")
+            self.recording = False
+            self.process = None
+            raise
+
+    def stop_recording(self):
+        if self.process:
+            try:
+                # Gracefully stop FFmpeg
+                self.process.communicate(b'q')
+                self.process.wait(timeout=5)
+                print(f"Stopped recording: {self.current_recording}")
+
+                if os.path.exists(self.current_recording):
+                    # Get file size in MB
+                    file_size = os.path.getsize(self.current_recording) / (1024 * 1024)
+                    print(f"Video file size: {file_size:.2f} MB")
+
+                    allure.attach.file(
+                        self.current_recording,
+                        name=os.path.basename(self.current_recording),
+                        attachment_type=allure.attachment_type.MP4
+                    )
+                    print("Video attached to Allure report successfully")
+                else:
+                    print(f"Warning: Recording file not found at {self.current_recording}")
+
+            except Exception as e:
+                print(f"Error stopping recording: {str(e)}")
+                if self.process:
+                    self.process.kill()
+
+@pytest.fixture(scope="function")
+def video_recorder(request):
+    if request.config.getoption("--video"):
+        try:
+            recorder = VideoRecorder()
+            video_size = request.config.getoption("--video-size")
+            recorder.start_recording(request.node.name, video_size)
+            yield recorder
+            recorder.stop_recording()
+        except Exception as e:
+            print(f"Video recording error: {str(e)}")
+            yield None
+    else:
+        yield None
+
+def format_timestamp():
+    """Format timestamp in UTC"""
+    return datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+def log_test_info():
+    """Log test session information"""
+    current_time = format_timestamp()
+    user = getpass.getuser()
+    info = (
+        f"\nTest Session Info:\n"
+        f"Current Date and Time (UTC - YYYY-MM-DD HH:MM:SS formatted): {current_time}\n"
+        f"Current User's Login: {user}"
+    )
+    print(info)
+    return info
+
+@pytest.fixture
+def browser(request, video_recorder):
+    browser_name = request.config.getoption("--browser")
+    headless = request.config.getoption("--headless")
+    window_size = request.config.getoption("--window-size")
+    enable_logs = request.config.getoption("--enable-logs")
+    
+    log_test_info()
+    
+    try:
+        if browser_name == "chrome":
+            options = ChromeOptions()
+            if headless:
+                options.add_argument("--headless")
+            if enable_logs:
+                options.add_argument("--enable-logging")
+            driver = webdriver.Chrome(options=options)
+        elif browser_name == "firefox":
+            options = FirefoxOptions()
+            if headless:
+                options.add_argument("--headless")
+            if enable_logs:
+                options.log.level = "trace"
+            driver = webdriver.Firefox(options=options)
+        else:
+            raise ValueError(f"Unsupported browser: {browser_name}")
+        
+        if window_size:
+            width, height = map(int, window_size.split('x'))
+            driver.set_window_size(width, height)
+        else:
+            driver.maximize_window()
+        
+        driver.implicitly_wait(request.config.getoption("--implicit-wait"))
+        print(f"Browser started: {browser_name}")
+        
+        yield driver
+        
+    except Exception as e:
+        print(f"Error setting up browser: {str(e)}")
+        raise
+    finally:
+        if 'driver' in locals():
+            driver.quit()
+            print("Browser closed")
+
+def pytest_configure(config):
+    # Create necessary directories
+    for directory in ['allure-results', 'video-results']:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--browser",
+        action="store",
+        default="chrome",
+        help="Browser to run tests on. Options: chrome, firefox"
+    )
+    parser.addoption(
+        "--headless",
+        action="store_true",
+        default=False,
+        help="Run tests in headless mode"
+    )
+    parser.addoption(
+        "--video",
+        action="store_true",
+        default=False,
+        help="Record video of the test run"
+    )
+    parser.addoption(
+        "--video-size",
+        action="store",
+        default="1920x1080",
+        help="Set the video recording size. Format: WIDTHxHEIGHT"
+    )
+    parser.addoption(
+        "--window-size",
+        action="store",
+        default="1920x1080",
+        help="Set the browser window size. Format: WIDTHxHEIGHT"
+    )
+    parser.addoption(
+        "--enable-logs",
+        action="store_true",
+        default=False,
+        help="Enable browser logs"
+    )
+    parser.addoption(
+        "--implicit-wait",
+        action="store",
+        type=int,
+        default=10,
+        help="Set implicit wait time in seconds"
+    )
