@@ -81,10 +81,10 @@ pytest --headed --browser-type=edge --alluredir=allure-results
 
 ## 🎥✅ Results 
 
-https://github.com/user-attachments/assets/c1c5a2db-60c9-400d-8e3e-31d5a419bc04
+https://github.com/user-attachments/assets/d5bbb00f-a65e-4644-935d-6ced6c54a299
 
 ---
 
 ## 🎯 Conclusion
 This guide helps you quickly set up, run, and analyze Selenium UI tests with Allure reports. 🚀
-# SeleniumPythonFunctional
+
